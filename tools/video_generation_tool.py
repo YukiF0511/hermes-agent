@@ -307,7 +307,13 @@ def _normalize_reference_images(value: Any) -> Optional[List[str]]:
     return out or None
 
 
-def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
+def generate_video_once(args: Dict[str, Any]) -> dict:
+    """Run a single video generation request and return the result dict.
+
+    Importable by ``video_sequence_generation_tool`` for use in multi-clip
+    sequences. Returns an ``error_response`` dict on any failure so callers
+    can check ``result.get("error")`` without catching exceptions.
+    """
     prompt = (args.get("prompt") or "").strip()
     image_url = (args.get("image_url") or "").strip() or None
     reference_image_urls = _normalize_reference_images(args.get("reference_image_urls"))
@@ -319,19 +325,34 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
     seed = _coerce_int(args.get("seed"))
     model_override = (args.get("model") or "").strip() or None
 
-    # Soft validation — providers do their own. Prompt is required by the
-    # schema; the backend may still accept image-only on its image-to-video
-    # endpoint but our surface always needs a prompt.
     if not prompt:
-        return tool_error("prompt is required for video generation")
+        return error_response(
+            error="prompt is required for video generation",
+            error_type="invalid_request",
+        )
 
-    # Resolve the active provider.
     configured = _read_configured_video_provider()
     provider = _resolve_active_provider()
     if provider is None:
-        return _missing_provider_error(configured)
+        if configured:
+            msg = (
+                f"video_gen.provider='{configured}' is set but no plugin "
+                f"registered that name. Run `hermes plugins list` to see "
+                f"installed video gen backends, or `hermes tools` → Video "
+                f"Generation to pick one."
+            )
+            return error_response(
+                error=msg, error_type="provider_not_registered",
+                provider=configured,
+            )
+        return error_response(
+            error=(
+                "No video generation backend is configured. Run `hermes tools` → "
+                "Video Generation to enable one (xAI, FAL, or Google Veo)."
+            ),
+            error_type="no_provider_configured",
+        )
 
-    # Resolve model: explicit arg wins, then config, then provider default.
     model = model_override or _read_configured_video_model() or provider.default_model()
 
     kwargs: Dict[str, Any] = {
@@ -345,19 +366,16 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
         "audio": audio,
         "seed": seed,
     }
-    # Drop None entries so providers see clean defaults.
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
     try:
         result = provider.generate(prompt=prompt, **kwargs)
     except TypeError as exc:
-        # A provider that hasn't widened its signature is a bug, not a
-        # caller error — log and surface a clear contract message.
         logger.warning(
             "video_gen provider '%s' rejected kwargs (signature too narrow): %s",
             getattr(provider, "name", "?"), exc,
         )
-        return json.dumps(error_response(
+        return error_response(
             error=(
                 f"Provider '{getattr(provider, 'name', '?')}' signature is "
                 f"out of date with the video_generate schema. Report this "
@@ -367,30 +385,34 @@ def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
             provider=getattr(provider, "name", ""),
             model=model or "",
             prompt=prompt,
-        ))
+        )
     except Exception as exc:
         logger.warning(
             "video_gen provider '%s' raised: %s",
             getattr(provider, "name", "?"), exc,
         )
-        return json.dumps(error_response(
+        return error_response(
             error=f"Provider '{getattr(provider, 'name', '?')}' error: {exc}",
             error_type="provider_exception",
             provider=getattr(provider, "name", ""),
             model=model or "",
             prompt=prompt,
-        ))
+        )
 
     if not isinstance(result, dict):
-        return json.dumps(error_response(
+        return error_response(
             error="Provider returned a non-dict result",
             error_type="provider_contract",
             provider=getattr(provider, "name", ""),
             model=model or "",
             prompt=prompt,
-        ))
+        )
 
-    return json.dumps(result)
+    return result
+
+
+def _handle_video_generate(args: Dict[str, Any], **_kw: Any) -> str:
+    return json.dumps(generate_video_once(args))
 
 
 # ---------------------------------------------------------------------------
