@@ -1,18 +1,18 @@
 """
-Video Sequence — Segment Planning & Media Utilities
+動画シーケンス — セグメント計画・メディアユーティリティ
 ====================================================
 
-Core module for long-video continuous generation.
+長尺動画の連続生成を行うコアモジュール。
 
-Provides:
-  - VideoSequenceRequest / VideoSegmentPlan dataclasses
-  - plan_segments() — split total duration respecting provider caps
-  - materialize_video() — download/copy a video to the local sequence cache
-  - extract_last_frame() — pull the last frame from a video via ffmpeg
-  - image_file_to_data_url() — base64-encode an image file as a data URL
-  - concat_videos() — concatenate mp4 files via ffmpeg re-encode
+提供機能:
+  - VideoSequenceRequest / VideoSegmentPlan データクラス
+  - plan_segments() — プロバイダーの上限を尊重しながら合計尺をセグメント分割
+  - materialize_video() — 動画をローカルシーケンスキャッシュにダウンロード/コピー
+  - extract_last_frame() — ffmpeg で動画の最終フレームを取得
+  - image_file_to_data_url() — 画像ファイルを base64 データ URL にエンコード
+  - concat_videos() — ffmpeg の再エンコードで mp4 を結合
 
-Cache layout: $HERMES_HOME/cache/videos/sequences/<sequence_id>/
+キャッシュ配置: $HERMES_HOME/cache/videos/sequences/<sequence_id>/
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 
 
 def _sequence_cache_dir(sequence_id: str) -> Path:
-    """Return $HERMES_HOME/cache/videos/sequences/<sequence_id>/, creating parents."""
+    """$HERMES_HOME/cache/videos/sequences/<sequence_id>/ を返す（親ディレクトリも作成する）。"""
     from hermes_constants import get_hermes_home
 
     path = get_hermes_home() / "cache" / "videos" / "sequences" / sequence_id
@@ -51,27 +51,27 @@ def _sequence_cache_dir(sequence_id: str) -> Path:
 
 @dataclass
 class VideoSegmentPlan:
-    """A single planned video segment in a sequence."""
+    """シーケンス内の単一の計画済み動画セグメント。"""
 
     index: int
     start_seconds: float
-    duration: int  # seconds, clamped to provider [min_duration, max_duration]
+    duration: int  # 秒数。プロバイダーの [min_duration, max_duration] にクランプ済み
     prompt_hint: str = ""
 
 
 @dataclass
 class VideoSequenceRequest:
-    """Top-level request for a long video composed of multiple segments."""
+    """複数セグメントから構成される長尺動画の最上位リクエスト。"""
 
-    total_duration: int  # target total seconds
-    segment_duration: int  # preferred seconds per segment
+    total_duration: int  # 目標合計秒数
+    segment_duration: int  # セグメントあたりの希望秒数
     prompt: str
     sequence_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     aspect_ratio: str = "16:9"
     resolution: str = "720p"
     provider_name: str = ""
 
-    # Filled in by plan_segments()
+    # plan_segments() によって設定される
     segments: List[VideoSegmentPlan] = field(default_factory=list)
 
 
@@ -85,23 +85,23 @@ def plan_segments(
     segment_duration: int,
     provider_caps: Dict[str, Any],
 ) -> List[VideoSegmentPlan]:
-    """Split *total_duration* into segments respecting provider capability limits.
+    """*total_duration* をプロバイダーの上限を尊重しながらセグメントに分割する。
 
     Args:
-        total_duration: Target total video length in seconds.
-        segment_duration: Preferred duration per segment in seconds.
-        provider_caps: Dict returned by ``VideoGenProvider.capabilities()``.
-            Reads ``min_duration`` (default 1) and ``max_duration`` (default 10).
+        total_duration: 目標の動画合計尺（秒）。
+        segment_duration: セグメントあたりの希望尺（秒）。
+        provider_caps: ``VideoGenProvider.capabilities()`` が返す辞書。
+            ``min_duration``（デフォルト 1）と ``max_duration``（デフォルト 10）を参照する。
 
     Returns:
-        Ordered list of :class:`VideoSegmentPlan` covering the full duration.
-        The last segment may be shorter than ``segment_duration`` when the
-        total is not evenly divisible, but never below ``min_duration``.
+        全尺をカバーする :class:`VideoSegmentPlan` の順序付きリスト。
+        合計が割り切れない場合、最後のセグメントは ``segment_duration`` より短くなることがあるが、
+        ``min_duration`` を下回ることはない。
     """
     min_dur: int = int(provider_caps.get("min_duration", 1))
     max_dur: int = int(provider_caps.get("max_duration", 10))
 
-    # Clamp the preferred segment duration to provider limits.
+    # 希望セグメント尺をプロバイダーの上限にクランプする。
     clamped = max(min_dur, min(segment_duration, max_dur))
 
     n_segments = math.ceil(total_duration / clamped)
@@ -110,7 +110,7 @@ def plan_segments(
     remaining = total_duration
     for i in range(n_segments):
         dur = min(clamped, remaining)
-        # Never emit a segment shorter than the provider minimum.
+        # プロバイダーの最小値を下回るセグメントは生成しない。
         if dur < min_dur:
             dur = min_dur
         plans.append(
@@ -138,15 +138,15 @@ def materialize_video(
     sequence_id: Optional[str] = None,
     filename: Optional[str] = None,
 ) -> Path:
-    """Download or copy a video into the local sequence cache.
+    """動画をローカルシーケンスキャッシュにダウンロードまたはコピーする。
 
     Args:
-        url_or_path: HTTP(S) URL or absolute/relative filesystem path.
-        sequence_id: Cache sub-directory key. Created as a random UUID when omitted.
-        filename: Override the saved filename. Derived from the source when omitted.
+        url_or_path: HTTP(S) URL またはファイルシステムの絶対/相対パス。
+        sequence_id: キャッシュのサブディレクトリキー。省略時はランダムな UUID が生成される。
+        filename: 保存するファイル名の上書き指定。省略時はソースから導出される。
 
     Returns:
-        Absolute :class:`Path` to the cached video file.
+        キャッシュ済み動画ファイルへの絶対 :class:`Path`。
     """
     sid = sequence_id or uuid.uuid4().hex
     cache_dir = _sequence_cache_dir(sid)
@@ -167,14 +167,13 @@ def materialize_video(
 
 
 def extract_last_frame(video_path: Path) -> Path:
-    """Extract the last frame of *video_path* as a PNG via ffmpeg.
+    """ffmpeg を使って *video_path* の最終フレームを PNG として抽出する。
 
-    The output is written to the same directory as the source video,
-    named ``<stem>_last_frame.png``.
+    出力はソース動画と同じディレクトリに ``<stem>_last_frame.png`` という名前で書き出される。
 
     Raises:
-        FileNotFoundError: If ffmpeg is not available on PATH.
-        subprocess.CalledProcessError: If ffmpeg exits with a non-zero status.
+        FileNotFoundError: ffmpeg が PATH 上に見つからない場合。
+        subprocess.CalledProcessError: ffmpeg がゼロ以外のステータスで終了した場合。
     """
     if shutil.which("ffmpeg") is None:
         raise FileNotFoundError(
@@ -184,7 +183,7 @@ def extract_last_frame(video_path: Path) -> Path:
     video_path = Path(video_path)
     out_path = video_path.parent / f"{video_path.stem}_last_frame.png"
 
-    # Probe the stream duration so we can seek close to the end.
+    # 終端近くにシークできるようにストリームの再生時間をプローブする。
     probe_cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -212,7 +211,7 @@ def extract_last_frame(video_path: Path) -> Path:
             str(out_path),
         ]
     else:
-        # Fallback when duration probe fails: use sseof to grab last frame.
+        # 再生時間のプローブに失敗した場合のフォールバック: sseof で最終フレームを取得する。
         cmd = [
             "ffmpeg", "-y",
             "-sseof", "-0.1",
@@ -227,18 +226,18 @@ def extract_last_frame(video_path: Path) -> Path:
 
 
 def image_file_to_data_url(path: Path) -> str:
-    """Read an image file and return a base64 data URL.
+    """画像ファイルを読み込み、base64 データ URL として返す。
 
     Args:
-        path: Path to the image file (PNG, JPEG, WebP, …).
+        path: 画像ファイルのパス（PNG、JPEG、WebP など）。
 
     Returns:
-        ``data:<mime>;base64,<encoded>`` string.
+        ``data:<mime>;base64,<encoded>`` 形式の文字列。
     """
     path = Path(path)
     mime, _ = mimetypes.guess_type(str(path))
     if not mime:
-        mime = "image/png"  # safe default for ffmpeg-extracted frames
+        mime = "image/png"  # ffmpeg で抽出したフレームのデフォルト値として安全
     raw = path.read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{b64}"
@@ -248,22 +247,22 @@ def concat_videos(
     paths: List[Path],
     output_path: Path,
 ) -> Path:
-    """Concatenate a list of mp4 files into a single output via ffmpeg re-encode.
+    """mp4 ファイルのリストを ffmpeg の再エンコードで一つの出力ファイルに結合する。
 
-    Uses the ``concat`` demuxer with a temporary file-list, then re-encodes
-    to H.264/AAC for a clean, seekable output.
+    一時ファイルリストを使った ``concat`` デマルチプレクサを使用し、
+    シーク可能なクリーンな出力を得るために H.264/AAC で再エンコードする。
 
     Args:
-        paths: Ordered list of source video paths.
-        output_path: Destination path for the concatenated mp4.
+        paths: ソース動画パスの順序付きリスト。
+        output_path: 結合後の mp4 の出力先パス。
 
     Returns:
-        Absolute :class:`Path` to the output file.
+        出力ファイルへの絶対 :class:`Path`。
 
     Raises:
-        FileNotFoundError: If ffmpeg is not available on PATH.
-        ValueError: If *paths* is empty.
-        subprocess.CalledProcessError: If ffmpeg exits with a non-zero status.
+        FileNotFoundError: ffmpeg が PATH 上に見つからない場合。
+        ValueError: *paths* が空の場合。
+        subprocess.CalledProcessError: ffmpeg がゼロ以外のステータスで終了した場合。
     """
     if not paths:
         raise ValueError("concat_videos() requires at least one input path")
